@@ -1,0 +1,643 @@
+"""
+KAUIL-SAT · Panel de Telemetría
+================================
+Replica exacta del dashboard propuesto, construida con Dash + Plotly.
+
+CÓMO CORRER:
+    pip install dash plotly pyserial
+    python kauil_dashboard.py
+    Abre tu navegador en:  http://127.0.0.1:8050
+
+ESTRUCTURA DEL ARCHIVO:
+    1. Configuración de colores y constantes
+    2. Fuente de datos  ← AQUÍ cambias simulación → hardware real
+    3. Layout del dashboard
+    4. Callbacks (actualizan los gráficos en tiempo real)
+    5. Arranque de la app
+
+PARA CONECTAR HARDWARE REAL (nRF24L01 vía ESP32):
+    - Descomentar la sección "HARDWARE REAL" en la función get_sensor_data()
+    - Cambiar COM_PORT al puerto correcto (ej. 'COM3' en Windows, '/dev/ttyUSB0' en Linux/Mac)
+    - El ESP32 debe enviar líneas con formato:  TEMP,38.5,247.3,74.2,0.41
+"""
+
+# ── Imports ───────────────────────────────────────────────────────────────────
+import random
+import time
+import collections
+import numpy as np
+from scipy.ndimage import gaussian_filter
+from datetime import datetime, timezone
+
+import plotly.graph_objects as go
+import plotly.express as px
+from dash import Dash, dcc, html, Input, Output, callback
+
+# ── 1. PALETA Y CONSTANTES ────────────────────────────────────────────────────
+BG      = '#0A0E1A'   # Fondo principal (negro espacial)
+PANEL   = '#111827'   # Fondo de tarjetas
+PANEL_B = '#1F2937'   # Fondo secundario
+ACCENT  = '#38BDF8'   # Azul cielo principal
+RED     = '#EF4444'   # Alertas críticas
+AMBER   = '#F59E0B'   # Advertencias
+GREEN   = '#22C55E'   # OK / nominal
+TEAL    = '#14B8A6'   # Sensor / protocolo
+WHITE   = '#F0F9FF'   # Texto principal
+MUTED   = '#94A3B8'   # Texto secundario
+BORDER  = '#1E3A5F'   # Bordes de tarjetas
+
+# Umbral de alerta de temperatura (°C)
+TEMP_UMBRAL = 230
+
+# Intervalo de actualización en milisegundos
+INTERVALO_MS = 2000
+
+# Historial de temperatura (ventana de 60 puntos = 2 min a 2s/punto)
+HISTORIAL_MAX = 60
+
+# Buffer circular de temperatura volcánica
+historial_temp = collections.deque(
+    [220 + i * 0.45 for i in range(HISTORIAL_MAX)],
+    maxlen=HISTORIAL_MAX
+)
+historial_tiempo = collections.deque(
+    list(range(-HISTORIAL_MAX + 1, 1)),
+    maxlen=HISTORIAL_MAX
+)
+
+
+# ── 2. FUENTE DE DATOS ────────────────────────────────────────────────────────
+# Esta función es el único lugar que necesitas modificar para cambiar
+# de datos simulados a datos reales del nRF24L01.
+
+def get_sensor_data():
+    """
+    Devuelve un diccionario con las lecturas actuales del sistema.
+
+    MODO SIMULADO (activo ahora):
+        Genera datos aleatorios que imitan el comportamiento real.
+
+    MODO HARDWARE REAL (descomentar para usar con ESP32 + nRF24L01):
+        Lee una línea del puerto serial con formato:
+        TEMP_INT,TEMP_VOLCAN,BATERIA_PCT,LATENCIA
+        Ejemplo:  38.5,247.3,74.2,0.41
+    """
+
+    # ── SIMULACIÓN ────────────────────────────────────────────────────────
+    ultima_temp = historial_temp[-1]
+    nueva_temp  = ultima_temp + random.uniform(-0.5, 1.2)   # tendencia ascendente
+    nueva_temp  = max(215, min(270, nueva_temp))             # límites físicos
+
+    historial_temp.append(nueva_temp)
+    historial_tiempo.append(historial_tiempo[-1] + 1)
+
+    # Mapa térmico simulado: zona caliente en el centro (cráter volcánico)
+    thermal = np.random.uniform(60, 120, (24, 32))
+    thermal[8:14, 12:20] = np.random.uniform(nueva_temp * 0.85, nueva_temp, (6, 8))
+    thermal[6:16, 10:22] = np.maximum(
+        thermal[6:16, 10:22],
+        np.random.uniform(nueva_temp * 0.6, nueva_temp * 0.8, (10, 12))
+    )
+    thermal = gaussian_filter(thermal, sigma=1.5)
+
+    return {
+        'temp_volcan':   round(nueva_temp, 1),
+        'temp_interna':  round(random.uniform(36.5, 40.5), 1),
+        'bateria_pct':   round(max(60, 74 - (time.time() % 3600) / 3600 * 5), 1),
+        'latencia':      round(random.uniform(0.28, 0.65), 2),
+        'thermal_map':   thermal,
+        'historial_temp': list(historial_temp),
+        'historial_tiempo': list(historial_tiempo),
+        'rssi':          round(random.uniform(-88, -76), 1),
+        'paquetes_tx':   int(time.time()) % 9999,
+        'cpu_pct':       random.randint(22, 45),
+    }
+
+    # ── HARDWARE REAL (descomentar las líneas de abajo) ───────────────────
+    # import serial
+    # COM_PORT = '/dev/ttyUSB0'   # Linux/Mac  →  cambiar según tu sistema
+    # COM_PORT = 'COM3'           # Windows    →  cambiar según tu puerto
+    # BAUD_RATE = 115200
+    #
+    # try:
+    #     ser = serial.Serial(COM_PORT, BAUD_RATE, timeout=1)
+    #     linea = ser.readline().decode('utf-8').strip()
+    #     partes = linea.split(',')
+    #     temp_int    = float(partes[0])
+    #     temp_volcan = float(partes[1])
+    #     bateria     = float(partes[2])
+    #     latencia    = float(partes[3])
+    #     ser.close()
+    #
+    #     historial_temp.append(temp_volcan)
+    #     historial_tiempo.append(historial_tiempo[-1] + 1)
+    #
+    #     return {
+    #         'temp_volcan':   temp_volcan,
+    #         'temp_interna':  temp_int,
+    #         'bateria_pct':   bateria,
+    #         'latencia':      latencia,
+    #         'thermal_map':   np.zeros((24, 32)),  # si envías la matriz, parsearla aquí
+    #         'historial_temp':  list(historial_temp),
+    #         'historial_tiempo': list(historial_tiempo),
+    #         'rssi':          -82.0,
+    #         'paquetes_tx':   0,
+    #         'cpu_pct':       0,
+    #     }
+    # except Exception as e:
+    #     print(f"Error de lectura serial: {e}")
+    #     return None
+
+
+# ── 3. LAYOUT DEL DASHBOARD ───────────────────────────────────────────────────
+# Aquí se define la estructura visual. Cada bloque de html.Div es una sección.
+
+def make_layout():
+    return html.Div(style={
+        'backgroundColor': BG,
+        'minHeight': '100vh',
+        'padding': '16px 20px',
+        'fontFamily': '"Consolas", "Courier New", monospace',
+        'color': WHITE,
+    }, children=[
+
+        # ── Intervalo de actualización (invisible, dispara los callbacks)
+        dcc.Interval(id='intervalo', interval=INTERVALO_MS, n_intervals=0),
+
+        # ── BARRA SUPERIOR ──────────────────────────────────────────────────
+        html.Div(style={
+            'display': 'flex',
+            'justifyContent': 'space-between',
+            'alignItems': 'center',
+            'backgroundColor': PANEL,
+            'border': f'1px solid {BORDER}',
+            'borderRadius': '8px',
+            'padding': '10px 16px',
+            'marginBottom': '12px',
+        }, children=[
+            html.Div([
+                html.Span('KAUIL-SAT', style={
+                    'fontSize': '15px', 'fontWeight': 'bold',
+                    'color': WHITE, 'letterSpacing': '2px',
+                }),
+                html.Span('  ·  CubeSat 2U  ·  Monitoreo Volcánico Térmico  ·  UNAM FI  ·  Grupo 03',
+                          style={'fontSize': '11px', 'color': MUTED}),
+            ]),
+            html.Div(style={'display': 'flex', 'alignItems': 'center', 'gap': '16px'}, children=[
+                html.Span(id='modo-badge', style={
+                    'fontSize': '11px', 'padding': '3px 12px',
+                    'borderRadius': '20px', 'fontWeight': 'bold',
+                }),
+                html.Span(id='reloj', style={'fontSize': '11px', 'color': MUTED}),
+            ]),
+        ]),
+
+        # ── TARJETAS DE MÉTRICAS (fila de 4) ────────────────────────────────
+        html.Div(style={
+            'display': 'grid',
+            'gridTemplateColumns': 'repeat(4, 1fr)',
+            'gap': '10px',
+            'marginBottom': '12px',
+        }, children=[
+            # Temperatura volcán
+            html.Div(id='card-temp-volcan', style={
+                'backgroundColor': PANEL, 'borderRadius': '8px', 'padding': '12px 16px',
+            }),
+            # Temperatura interna
+            html.Div(id='card-temp-int', style={
+                'backgroundColor': PANEL, 'borderRadius': '8px', 'padding': '12px 16px',
+                'border': f'1px solid {BORDER}',
+            }),
+            # Batería
+            html.Div(id='card-bateria', style={
+                'backgroundColor': PANEL, 'borderRadius': '8px', 'padding': '12px 16px',
+                'border': f'1px solid {BORDER}',
+            }),
+            # Latencia
+            html.Div(id='card-latencia', style={
+                'backgroundColor': PANEL, 'borderRadius': '8px', 'padding': '12px 16px',
+                'border': f'1px solid {BORDER}',
+            }),
+        ]),
+
+        # ── GRÁFICAS PRINCIPALES (fila de 2) ────────────────────────────────
+        html.Div(style={
+            'display': 'grid',
+            'gridTemplateColumns': '1fr 1fr',
+            'gap': '10px',
+            'marginBottom': '12px',
+        }, children=[
+            # Gráfica de gradiente térmico
+            html.Div(style={
+                'backgroundColor': PANEL, 'borderRadius': '8px', 'padding': '12px',
+                'border': f'1px solid {BORDER}',
+            }, children=[
+                html.P('GRADIENTE TÉRMICO — MLX90640 (tiempo real)', style={
+                    'fontSize': '10px', 'color': MUTED,
+                    'marginBottom': '8px', 'letterSpacing': '0.5px',
+                }),
+                dcc.Graph(id='grafica-temp', style={'height': '200px'},
+                          config={'displayModeBar': False}),
+            ]),
+            # Mapa térmico
+            html.Div(style={
+                'backgroundColor': PANEL, 'borderRadius': '8px', 'padding': '12px',
+                'border': f'1px solid {BORDER}',
+            }, children=[
+                html.P('MAPA TÉRMICO — MLX90640 (32×24 píxeles)', style={
+                    'fontSize': '10px', 'color': MUTED,
+                    'marginBottom': '8px', 'letterSpacing': '0.5px',
+                }),
+                dcc.Graph(id='mapa-termico', style={'height': '200px'},
+                          config={'displayModeBar': False}),
+            ]),
+        ]),
+
+        # ── FILA INFERIOR (subsistemas + potencia + balance) ─────────────────
+        html.Div(style={
+            'display': 'grid',
+            'gridTemplateColumns': '1.2fr 1fr 0.8fr',
+            'gap': '10px',
+            'marginBottom': '12px',
+        }, children=[
+            # Subsistemas
+            html.Div(style={
+                'backgroundColor': PANEL, 'borderRadius': '8px', 'padding': '12px',
+                'border': f'1px solid {BORDER}',
+            }, children=[
+                html.P('ESTADO DE SUBSISTEMAS', style={
+                    'fontSize': '10px', 'color': MUTED,
+                    'marginBottom': '10px', 'letterSpacing': '0.5px',
+                }),
+                dcc.Graph(id='grafica-subsistemas', style={'height': '160px'},
+                          config={'displayModeBar': False}),
+            ]),
+            # Consumo de potencia
+            html.Div(style={
+                'backgroundColor': PANEL, 'borderRadius': '8px', 'padding': '12px',
+                'border': f'1px solid {BORDER}',
+            }, children=[
+                html.P('CONSUMO DE POTENCIA (mW)', style={
+                    'fontSize': '10px', 'color': MUTED,
+                    'marginBottom': '10px', 'letterSpacing': '0.5px',
+                }),
+                dcc.Graph(id='grafica-potencia', style={'height': '160px'},
+                          config={'displayModeBar': False}),
+            ]),
+            # Balance energético
+            html.Div(style={
+                'backgroundColor': PANEL, 'borderRadius': '8px', 'padding': '14px',
+                'border': f'1px solid {BORDER}',
+            }, children=[
+                html.P('BALANCE ENERGÉTICO', style={
+                    'fontSize': '10px', 'color': MUTED,
+                    'marginBottom': '10px', 'letterSpacing': '0.5px',
+                }),
+                html.Div(id='balance-energetico'),
+            ]),
+        ]),
+
+        # ── PANEL DE ALERTAS ────────────────────────────────────────────────
+        html.Div(id='panel-alertas', style={'marginBottom': '10px'}),
+
+        # ── LOG DE TELEMETRÍA ────────────────────────────────────────────────
+        html.Div(id='log-telemetria', style={
+            'backgroundColor': PANEL,
+            'border': f'1px solid {BORDER}',
+            'borderRadius': '8px',
+            'padding': '12px',
+        }),
+
+        # ── FOOTER ──────────────────────────────────────────────────────────
+        html.Div(style={
+            'display': 'flex', 'justifyContent': 'space-between',
+            'marginTop': '10px', 'fontSize': '10px', 'color': MUTED,
+        }, children=[
+            html.Span('Ground Station  ·  UNAM FI  ·  Ciudad Universitaria, CDMX'),
+            html.Span(id='link-status'),
+        ]),
+    ])
+
+
+# ── 4. CALLBACKS ──────────────────────────────────────────────────────────────
+# Los callbacks se ejecutan cada INTERVALO_MS milisegundos.
+# Reciben los datos de get_sensor_data() y actualizan todos los componentes.
+
+app = Dash(__name__)
+app.title = 'Kauil-Sat · Telemetría'
+app.layout = make_layout()
+
+
+def estilo_metrica(label, valor, unidad, color, delta_texto):
+    """Genera el contenido de una tarjeta de métrica."""
+    return [
+        html.P(label, style={'fontSize': '10px', 'color': MUTED, 'margin': '0 0 4px 0'}),
+        html.P([
+            html.Span(valor, style={'fontSize': '22px', 'fontWeight': 'bold', 'color': color}),
+            html.Span(f' {unidad}', style={'fontSize': '11px', 'color': MUTED}),
+        ], style={'margin': '0'}),
+        html.P(delta_texto, style={'fontSize': '10px', 'color': color, 'margin': '4px 0 0 0'}),
+    ]
+
+
+def grafica_base():
+    """Config base compartida por todas las gráficas."""
+    return dict(
+        paper_bgcolor=PANEL, plot_bgcolor=PANEL,
+        margin=dict(l=40, r=10, t=10, b=30),
+        font=dict(family='Consolas, monospace', color=MUTED, size=10),
+        xaxis=dict(gridcolor=BORDER, zeroline=False),
+        yaxis=dict(gridcolor=BORDER, zeroline=False),
+    )
+
+
+@callback(
+    # Todos los IDs que se actualizan en cada tick
+    Output('reloj',               'children'),
+    Output('modo-badge',          'children'),
+    Output('modo-badge',          'style'),
+    Output('card-temp-volcan',    'children'),
+    Output('card-temp-volcan',    'style'),
+    Output('card-temp-int',       'children'),
+    Output('card-bateria',        'children'),
+    Output('card-latencia',       'children'),
+    Output('grafica-temp',        'figure'),
+    Output('mapa-termico',        'figure'),
+    Output('grafica-subsistemas', 'figure'),
+    Output('grafica-potencia',    'figure'),
+    Output('balance-energetico',  'children'),
+    Output('panel-alertas',       'children'),
+    Output('log-telemetria',      'children'),
+    Output('link-status',         'children'),
+    Input('intervalo',            'n_intervals'),
+)
+def actualizar_todo(n):
+    datos = get_sensor_data()
+    if datos is None:
+        return ['Error de conexión'] + [None] * 15
+
+    tv   = datos['temp_volcan']
+    ti   = datos['temp_interna']
+    bat  = datos['bateria_pct']
+    lat  = datos['latencia']
+    rssi = datos['rssi']
+    cpu  = datos['cpu_pct']
+    hist = datos['historial_temp']
+    hist_t = datos['historial_tiempo']
+    thermal = datos['thermal_map']
+
+    ahora = datetime.now(timezone.utc).strftime('%H:%M:%S UTC')
+    alerta_activa = tv > TEMP_UMBRAL
+
+    # ── Reloj + badge de modo ──────────────────────────────────────────────
+    if alerta_activa:
+        modo_txt   = '⚠ ALERTA CRÍTICA'
+        modo_style = {'fontSize': '11px', 'padding': '3px 12px', 'borderRadius': '20px',
+                      'fontWeight': 'bold', 'backgroundColor': '#3D0A0A', 'color': RED,
+                      'border': f'1px solid {RED}'}
+    else:
+        modo_txt   = '● OBSERVATION'
+        modo_style = {'fontSize': '11px', 'padding': '3px 12px', 'borderRadius': '20px',
+                      'fontWeight': 'bold', 'backgroundColor': '#0D2A14', 'color': GREEN,
+                      'border': f'1px solid {GREEN}'}
+
+    # ── Tarjetas de métricas ───────────────────────────────────────────────
+    color_tv = RED if alerta_activa else AMBER
+    delta_tv = f'+{tv - hist[-2]:.1f}°C desde última lectura' if len(hist) > 1 else ''
+    card_tv  = estilo_metrica('TEMP. VOLCÁN (MLX90640)', f'{tv}', '°C', color_tv, delta_tv)
+    borde_tv = {'backgroundColor': PANEL, 'borderRadius': '8px', 'padding': '12px 16px',
+                'border': f'2px solid {RED}' if alerta_activa else f'1px solid {BORDER}'}
+
+    card_ti  = estilo_metrica('TEMP. INTERNA (LM35)', f'{ti}', '°C', GREEN, 'nominal')
+    card_bat = estilo_metrica('BATERÍA 3S (Li-ion)', f'{bat}', '%',
+                              GREEN if bat > 50 else AMBER, f'{11.1 - (74 - bat) * 0.02:.2f} V')
+    card_lat = estilo_metrica('LATENCIA TLC', f'{lat}', 's',
+                              GREEN if lat < 1 else RED, 'req. < 1 s ✓' if lat < 1 else 'req. < 1 s ✗')
+
+    # ── Gráfica de gradiente térmico ──────────────────────────────────────
+    fig_temp = go.Figure()
+    fig_temp.add_trace(go.Scatter(
+        x=list(hist_t), y=hist,
+        fill='tozeroy', fillcolor='rgba(239,68,68,0.08)',
+        line=dict(color=RED, width=1.5),
+        mode='lines', name='Temp. volcán',
+    ))
+    fig_temp.add_hline(y=TEMP_UMBRAL, line=dict(color=AMBER, width=1, dash='dash'))
+    fig_temp.add_annotation(
+        x=hist_t[2], y=TEMP_UMBRAL + 2,
+        text=f'umbral crítico {TEMP_UMBRAL}°C',
+        showarrow=False, font=dict(size=9, color=AMBER),
+    )
+    fig_temp.update_layout(
+        **grafica_base(),
+        yaxis=dict(range=[200, 275], gridcolor=BORDER, zeroline=False,
+                   ticksuffix='°C', tickfont=dict(size=9)),
+        xaxis=dict(gridcolor=BORDER, zeroline=False, ticksuffix='s', tickfont=dict(size=9)),
+        showlegend=False,
+    )
+
+    # ── Mapa térmico (heatmap) ─────────────────────────────────────────────
+    fig_mapa = go.Figure(go.Heatmap(
+        z=thermal, colorscale='Inferno',
+        zmin=60, zmax=270,
+        colorbar=dict(
+            thickness=10, tickfont=dict(size=9, color=MUTED),
+            title=dict(text='°C', font=dict(size=9, color=MUTED)),
+            tickcolor=MUTED,
+        ),
+        hoverongaps=False,
+    ))
+    fig_mapa.update_layout(
+        **grafica_base(),
+        yaxis=dict(gridcolor='rgba(0,0,0,0)', zeroline=False, tickfont=dict(size=8)),
+        xaxis=dict(gridcolor='rgba(0,0,0,0)', zeroline=False, tickfont=dict(size=8)),
+        margin=dict(l=20, r=60, t=10, b=20),
+    )
+
+    # ── Barras de subsistemas ──────────────────────────────────────────────
+    subs  = ['PL sensor', 'ELEC', 'TLC (RF)', 'PW bat.', 'SW CPU', 'EST']
+    vals  = [95, 100, min(100, max(0, 100 + rssi + 82)), bat, cpu, 55]
+    cols  = [GREEN, GREEN, GREEN if vals[2] > 60 else AMBER, GREEN, GREEN, GREEN]
+
+    fig_sub = go.Figure(go.Bar(
+        x=vals, y=subs, orientation='h',
+        marker=dict(color=cols, opacity=0.85),
+        text=[f'{v:.0f}%' for v in vals],
+        textposition='outside',
+        textfont=dict(size=9, color=MUTED),
+        width=0.55,
+    ))
+    fig_sub.update_layout(
+        **grafica_base(),
+        xaxis=dict(range=[0, 115], gridcolor=BORDER, zeroline=False,
+                   tickfont=dict(size=8), showticklabels=False),
+        yaxis=dict(gridcolor='rgba(0,0,0,0)', zeroline=False, tickfont=dict(size=9)),
+        margin=dict(l=60, r=30, t=5, b=10),
+        showlegend=False,
+    )
+
+    # ── Barras de consumo de potencia ──────────────────────────────────────
+    comps  = ['ESP32', 'MLX90640', 'LoRa', 'LM35', 'Mini360']
+    powers = [52, 7.6, 20, 0.3, 25]
+    p_cols = [ACCENT, TEAL, '#D85A30', GREEN, AMBER]
+
+    fig_pow = go.Figure(go.Bar(
+        x=comps, y=powers,
+        marker=dict(color=p_cols, opacity=0.85),
+        text=[f'{p}' for p in powers],
+        textposition='outside',
+        textfont=dict(size=9, color=MUTED),
+        width=0.6,
+    ))
+    fig_pow.update_layout(
+        **grafica_base(),
+        yaxis=dict(gridcolor=BORDER, zeroline=False,
+                   ticksuffix=' mW', tickfont=dict(size=8)),
+        xaxis=dict(gridcolor='rgba(0,0,0,0)', zeroline=False,
+                   tickfont=dict(size=9)),
+        margin=dict(l=50, r=10, t=10, b=30),
+        showlegend=False,
+    )
+
+    # ── Balance energético ────────────────────────────────────────────────
+    autonomia = round((bat / 100) * 2.9, 1)
+    balance = html.Div(style={'fontSize': '11px'}, children=[
+        fila_balance('Consumo diario',  '9.5 Wh',   WHITE),
+        fila_balance('Capacidad 3S',    '27.7 Wh',  GREEN),
+        fila_balance('Panel solar',     '5 W',       ACCENT),
+        fila_balance('Autonomía s/sol', f'{autonomia} días', AMBER),
+        fila_balance('RSSI enlace',     f'{rssi} dBm',
+                     GREEN if rssi > -85 else RED),
+        fila_balance('Paquetes TX',     f'#{datos["paquetes_tx"]:04d}', MUTED),
+    ])
+
+    # ── Panel de alertas ──────────────────────────────────────────────────
+    def alerta(nivel, titulo, desc, color, bg_color):
+        return html.Div(style={
+            'backgroundColor': bg_color, 'borderRadius': '6px',
+            'border': f'1px solid {color}', 'padding': '9px 14px',
+            'marginBottom': '6px', 'display': 'flex', 'gap': '10px',
+        }, children=[
+            html.Span(nivel, style={
+                'fontSize': '10px', 'fontWeight': 'bold', 'color': color,
+                'backgroundColor': color + '22', 'padding': '2px 8px',
+                'borderRadius': '4px', 'flexShrink': '0', 'alignSelf': 'flex-start',
+            }),
+            html.Div([
+                html.P(titulo, style={'fontSize': '11px', 'fontWeight': 'bold',
+                                      'color': color, 'margin': '0 0 2px 0'}),
+                html.P(desc,   style={'fontSize': '10px', 'color': MUTED, 'margin': '0'}),
+            ]),
+        ])
+
+    alertas_list = [
+        html.P('PANEL DE ALERTAS', style={
+            'fontSize': '10px', 'color': MUTED, 'letterSpacing': '0.5px',
+            'margin': '0 0 8px 0',
+        }),
+    ]
+    if alerta_activa:
+        alertas_list.append(alerta(
+            '⚠ CRÍTICO',
+            f'Anomalía térmica detectada — posible actividad volcánica',
+            f'MLX90640: {tv}°C (+{tv-TEMP_UMBRAL:.1f}°C sobre umbral). '
+            f'Umbral crítico {TEMP_UMBRAL}°C superado. Transmisión prioritaria activada.',
+            RED, '#1A0505',
+        ))
+    else:
+        alertas_list.append(alerta(
+            '✓ NOMINAL',
+            f'Temperatura dentro de parámetros normales',
+            f'MLX90640: {tv}°C — por debajo del umbral crítico de {TEMP_UMBRAL}°C.',
+            GREEN, '#051A0A',
+        ))
+
+    alertas_list.append(alerta(
+        '⚠ WARN' if rssi < -85 else '✓ OK',
+        'Señal RF — nRF24L01',
+        f'RSSI: {rssi} dBm. Margen: {rssi + 94:.0f} dB sobre sensibilidad mínima.',
+        AMBER if rssi < -85 else GREEN,
+        '#1A1205' if rssi < -85 else '#051A0A',
+    ))
+    alertas_list.append(alerta(
+        '✓ OK', 'Balance energético positivo',
+        f'Paneles solares: 5 W generados. Consumo: ~105 mW. Batería: {bat}%.',
+        GREEN, '#051A0A',
+    ))
+
+    panel_alertas = html.Div(style={
+        'backgroundColor': PANEL, 'borderRadius': '8px',
+        'border': f'2px solid {RED}' if alerta_activa else f'1px solid {BORDER}',
+        'padding': '12px',
+    }, children=alertas_list)
+
+    # ── Log de telemetría ──────────────────────────────────────────────────
+    def fila_log(tiempo, tag, msg, tag_color):
+        return html.Div(style={
+            'display': 'flex', 'gap': '12px', 'alignItems': 'center',
+            'padding': '4px 0', 'borderBottom': f'1px solid {BORDER}',
+            'fontSize': '10px',
+        }, children=[
+            html.Span(tiempo, style={'color': MUTED, 'width': '60px', 'flexShrink': '0'}),
+            html.Span(tag, style={
+                'color': tag_color, 'backgroundColor': tag_color + '22',
+                'padding': '1px 6px', 'borderRadius': '3px', 'fontWeight': 'bold',
+                'fontSize': '9px', 'flexShrink': '0',
+            }),
+            html.Span(msg, style={'color': WHITE}),
+        ])
+
+    from datetime import timedelta
+    base = datetime.now(timezone.utc)
+    logs = [
+        html.P('LOG DE TELEMETRÍA', style={
+            'fontSize': '10px', 'color': MUTED, 'margin': '0 0 8px 0',
+            'letterSpacing': '0.5px',
+        }),
+        fila_log(ahora, 'ALERTA' if alerta_activa else 'INFO',
+                 f'MLX90640: {tv}°C — {"umbral superado · transmisión prioritaria" if alerta_activa else "dentro de parámetros"}',
+                 RED if alerta_activa else ACCENT),
+        fila_log((base - timedelta(seconds=5)).strftime('%H:%M:%S'),
+                 'INFO', f'Captura MLX90640 completada · 768 px · {tv}°C máx', ACCENT),
+        fila_log((base - timedelta(seconds=10)).strftime('%H:%M:%S'),
+                 'OK', f'Paquete #{datos["paquetes_tx"]:04d} transmitido · latencia {lat} s', GREEN),
+        fila_log((base - timedelta(seconds=15)).strftime('%H:%M:%S'),
+                 'WARN' if rssi < -85 else 'OK',
+                 f'RSSI nRF24L01: {rssi} dBm', AMBER if rssi < -85 else GREEN),
+        fila_log((base - timedelta(seconds=30)).strftime('%H:%M:%S'),
+                 'OK', f'Batería 3S: {bat}% · Balance energético positivo', GREEN),
+    ]
+    log_panel = html.Div(children=logs)
+
+    # ── Footer de enlace ───────────────────────────────────────────────────
+    link_txt = f'● Enlace activo · nRF24L01 · 2.4 GHz · {rssi} dBm'
+
+    return (
+        ahora, modo_txt, modo_style,
+        card_tv, borde_tv, card_ti, card_bat, card_lat,
+        fig_temp, fig_mapa,
+        fig_sub, fig_pow,
+        balance, panel_alertas, log_panel, link_txt,
+    )
+
+
+def fila_balance(label, valor, color):
+    """Fila de una línea en el panel de balance energético."""
+    return html.Div(style={
+        'display': 'flex', 'justifyContent': 'space-between',
+        'borderBottom': f'1px solid {BORDER}', 'padding': '5px 0',
+    }, children=[
+        html.Span(label, style={'color': MUTED, 'fontSize': '10px'}),
+        html.Span(valor, style={'color': color, 'fontWeight': 'bold', 'fontSize': '10.5px'}),
+    ])
+
+
+# ── 5. ARRANQUE ───────────────────────────────────────────────────────────────
+if __name__ == '__main__':
+    print("\n" + "="*55)
+    print("  KAUIL-SAT · Panel de Telemetría")
+    print("="*55)
+    print("  Abre tu navegador en:  http://127.0.0.1:8050")
+    print("  Presiona Ctrl+C para detener")
+    print("="*55 + "\n")
+    app.run(debug=False, host='127.0.0.1', port=8050)
