@@ -428,13 +428,25 @@ def actualizar_todo(n):
         text=f'umbral crítico {TEMP_UMBRAL}°C',
         showarrow=False, font=dict(size=9, color=AMBER),
     )
-    fig_temp.update_layout(
-        **grafica_base(),
-        yaxis=dict(range=[200, 275], gridcolor=BORDER, zeroline=False,
-                   ticksuffix='°C', tickfont=dict(size=9)),
-        xaxis=dict(gridcolor=BORDER, zeroline=False, ticksuffix='s', tickfont=dict(size=9)),
-        showlegend=False,
+    # Configuración para Temperatura
+    conf_temp = grafica_base()
+    conf_temp.update(
+        yaxis=dict(
+            range=[200, 275], 
+            gridcolor=BORDER, 
+            zeroline=False,
+            ticksuffix='°C', 
+            tickfont=dict(size=9)
+        ),
+        xaxis=dict(
+            gridcolor=BORDER, 
+            zeroline=False, 
+            ticksuffix='s', 
+            tickfont=dict(size=9)
+        ),
+        showlegend=False
     )
+    fig_temp.update_layout(**conf_temp)
 
     # ── Mapa térmico (heatmap) ─────────────────────────────────────────────
     fig_mapa = go.Figure(go.Heatmap(
@@ -447,12 +459,22 @@ def actualizar_todo(n):
         ),
         hoverongaps=False,
     ))
-    fig_mapa.update_layout(
-        **grafica_base(),
-        yaxis=dict(gridcolor='rgba(0,0,0,0)', zeroline=False, tickfont=dict(size=8)),
-        xaxis=dict(gridcolor='rgba(0,0,0,0)', zeroline=False, tickfont=dict(size=8)),
-        margin=dict(l=20, r=60, t=10, b=20),
+    # Configuración para el Mapa / Trayectoria
+    conf_mapa = grafica_base()
+    conf_mapa.update(
+        yaxis=dict(
+            gridcolor=BORDER, 
+            zeroline=False, 
+            tickfont=dict(size=9)
+        ),
+        xaxis=dict(
+            gridcolor=BORDER, 
+            zeroline=False, 
+            tickfont=dict(size=9)
+        ),
+        showlegend=False
     )
+    fig_mapa.update_layout(**conf_mapa)
 
     # ── Barras de subsistemas ──────────────────────────────────────────────
     subs  = ['PL sensor', 'ELEC', 'TLC (RF)', 'PW bat.', 'SW CPU', 'EST']
@@ -467,14 +489,22 @@ def actualizar_todo(n):
         textfont=dict(size=9, color=MUTED),
         width=0.55,
     ))
-    fig_sub.update_layout(
-        **grafica_base(),
-        xaxis=dict(range=[0, 115], gridcolor=BORDER, zeroline=False,
-                   tickfont=dict(size=8), showticklabels=False),
-        yaxis=dict(gridcolor='rgba(0,0,0,0)', zeroline=False, tickfont=dict(size=9)),
-        margin=dict(l=60, r=30, t=5, b=10),
-        showlegend=False,
+    # Configuración para Subida / Gráfica Secundaria
+    conf_sub = grafica_base()
+    conf_sub.update(
+        xaxis=dict(
+            gridcolor=BORDER, 
+            zeroline=False, 
+            tickfont=dict(size=9)
+        ),
+        yaxis=dict(
+            gridcolor=BORDER, 
+            zeroline=False, 
+            tickfont=dict(size=9)
+        ),
+        showlegend=False
     )
+    fig_sub.update_layout(**conf_sub)
 
     # ── Barras de consumo de potencia ──────────────────────────────────────
     comps  = ['ESP32', 'MLX90640', 'LoRa', 'LM35', 'Mini360']
@@ -489,15 +519,24 @@ def actualizar_todo(n):
         textfont=dict(size=9, color=MUTED),
         width=0.6,
     ))
-    fig_pow.update_layout(
-        **grafica_base(),
-        yaxis=dict(gridcolor=BORDER, zeroline=False,
-                   ticksuffix=' mW', tickfont=dict(size=8)),
-        xaxis=dict(gridcolor='rgba(0,0,0,0)', zeroline=False,
-                   tickfont=dict(size=9)),
-        margin=dict(l=50, r=10, t=10, b=30),
-        showlegend=False,
+    # Configuración para Potencia / Batería
+    conf_pow = grafica_base()
+    conf_pow.update(
+        yaxis=dict(
+            gridcolor=BORDER, 
+            zeroline=False, 
+            tickfont=dict(size=9),
+            ticksuffix='V'  # Asumiendo que mides Voltaje
+        ),
+        xaxis=dict(
+            gridcolor=BORDER, 
+            zeroline=False, 
+            tickfont=dict(size=9),
+            ticksuffix='s'
+        ),
+        showlegend=False
     )
+    fig_pow.update_layout(**conf_pow)
 
     # ── Balance energético ────────────────────────────────────────────────
     autonomia = round((bat / 100) * 2.9, 1)
