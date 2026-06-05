@@ -1,7 +1,6 @@
 # Kauil-Sat · U2 CubeSat Project
 
-> CubeSat developed for the CanSat 2026 worldwide competition organized by UNAM.  
-> Built and tested at the National Autonomous University of Mexico.
+> CubeSat developed, built and tested at the National Autonomous University of Mexico. UNAM.  
 
 ---
 
