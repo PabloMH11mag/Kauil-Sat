@@ -46,7 +46,7 @@ This repository contains the code for two core systems:
 
 ## 🖼️ Hardware
 
-![Kauil-Sat prototype](cubesat.jpg)
+![Kauil-Sat prototype](cubesat.jpeg)
 
 *Kauil-Sat prototype showing internal subsystem layout — electronics, telecommunications, and structural layers.*
 
